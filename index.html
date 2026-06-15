@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Drone Intercept - Diagnostic View</title>
+    <style>
+        body { font-family: sans-serif; background: #1e1e24; color: #fff; text-align: center; }
+        canvas { background: #111; border: 2px solid #444; display: block; margin: 10px auto; }
+        #dashboard { display: flex; justify-content: space-between; width: 800px; margin: 0 auto; gap: 20px;}
+        .panel { font-family: monospace; background: #2a2a35; padding: 15px; border-radius: 5px; text-align: left; flex: 1;}
+        #logArea { height: 120px; overflow-y: auto; background: #000; color: #0f0; font-size: 12px; padding: 10px; border: 1px solid #444; border-radius: 4px; margin-top: 10px;}
+        #resetBtn { margin: 8px; padding: 8px 18px; font-size: 14px; cursor: pointer; background: #ff4757; color: #fff; border: none; border-radius: 4px; }
+        #resetBtn:hover { background: #ff6b78; }
+        #trainHud { display: none; width: 800px; margin: 6px auto 0; padding: 10px 14px;
+            background: #2a2a35; border: 1px solid #4a90d9; border-radius: 5px;
+            font-family: monospace; font-size: 14px; text-align: left;
+            display: none; justify-content: space-between; align-items: center; }
+        #trainHud .hudItem b { color: #4a90d9; }
+        #hudResult { font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h1>Drone Flight Core Simulator</h1>
+    <p>Controls: <b>Up</b> to thrust, <b>Down</b> to reverse/dive, <b>Left/Right</b> to pitch, <b>R</b> to reset.</p>
+
+    <button id="resetBtn">Reset (R)</button>
+
+    <div id="trainHud">
+        <span class="hudItem">Phase: <b id="hudPhase">-</b></span>
+        <span class="hudItem">Episode: <b id="hudEp">0</b></span>
+        <span class="hudItem">Success(200): <b id="hudSucc">-</b></span>
+        <span class="hudItem">&epsilon;: <b id="hudEps">-</b></span>
+        <span id="hudResult"></span>
+    </div>
+
+    <canvas id="simCanvas" width="800" height="600"></canvas>
+
+    <div id="dashboard">
+        <div class="panel">
+            <h3 style="margin-top:0;">State Space</h3>
+            <div>Distance: <span id="distVal">0</span> px</div>
+            <div>Relative Angle: <span id="angleVal">0</span> rad</div>
+            <hr style="border-color: #444; margin: 10px 0;">
+            <div>Drone X: <span id="droneX">0</span></div>
+            <div>Drone Y: <span id="droneY">0</span></div>
+        </div>
+
+        <div class="panel">
+            <h3 style="margin-top:0;">Diagnostic Log</h3>
+            <div id="logArea">Initializing...<br></div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+        const logArea = document.getElementById('logArea');
+
+        const keys = { thrust: false, reverse: false, left: false, right: false };
+
+        function sysLog(message) {
+            const time = new Date().toISOString().split('T')[1].slice(0, -1);
+            const logLine = `[${time}] ${message}<br>`;
+            logArea.innerHTML = logLine + logArea.innerHTML;
+            if (logArea.childNodes.length > 30) {
+                logArea.removeChild(logArea.lastChild);
+            }
+        }
+
+        // --- WebSocket with AUTO-RECONNECT ---
+        // If the Python server restarts (or the link drops), the browser
+        // reconnects on its own and the server hands back a fresh sim.
+        let ws = null;
+
+        function connect() {
+            ws = new WebSocket('ws://localhost:8765');
+
+            ws.onopen = () => sysLog('WebSocket CONNECTED to Python Server');
+            ws.onerror = () => { sysLog('<span style="color:red">WebSocket ERROR</span>'); };
+            ws.onclose = () => {
+                sysLog('<span style="color:red">DISCONNECTED - retrying in 1s...</span>');
+                setTimeout(connect, 1000);
+            };
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                render(data);
+                frameCount++;
+                if (frameCount % 60 === 0) {
+                    sysLog(`IN (Heartbeat): Drone at Y=${data.drone.y.toFixed(1)}`);
+                }
+            };
+        }
+
+        function send(payload) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify(payload));
+            }
+        }
+
+        function sendInputs() {
+            send(keys);
+        }
+
+        // --- RESET: one-shot command to the server ---
+        function requestReset() {
+            send({ ...keys, reset: true });
+            sysLog('OUT: RESET requested');
+        }
+        document.getElementById('resetBtn').addEventListener('click', requestReset);
+
+        window.addEventListener('keydown', (e) => {
+            if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) {
+                e.preventDefault();
+            }
+
+            if (e.key === 'r' || e.key === 'R') { requestReset(); return; }
+
+            let changed = false;
+            if (e.key === 'ArrowUp' && !keys.thrust) { keys.thrust = true; changed = true; }
+            if (e.key === 'ArrowDown' && !keys.reverse) { keys.reverse = true; changed = true; }
+            if (e.key === 'ArrowLeft' && !keys.left) { keys.left = true; changed = true; }
+            if (e.key === 'ArrowRight' && !keys.right) { keys.right = true; changed = true; }
+
+            if (changed) {
+                sysLog(`OUT: ${JSON.stringify(keys)}`);
+                sendInputs();
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            let changed = false;
+            if (e.key === 'ArrowUp') { keys.thrust = false; changed = true; }
+            if (e.key === 'ArrowDown') { keys.reverse = false; changed = true; }
+            if (e.key === 'ArrowLeft') { keys.left = false; changed = true; }
+            if (e.key === 'ArrowRight') { keys.right = false; changed = true; }
+
+            if (changed) {
+                sysLog(`OUT: ${JSON.stringify(keys)}`);
+                sendInputs();
+            }
+        });
+
+        let frameCount = 0;
+
+        function drawDroneProfile(x, y, angle, bodyColor, isThrusting, isReversing) {
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(angle + Math.PI);
+
+            ctx.fillStyle = '#555';
+            ctx.fillRect(-20, -2, 40, 4);
+
+            ctx.fillStyle = bodyColor;
+            ctx.beginPath();
+            ctx.ellipse(0, 2, 8, 6, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = '#333';
+            ctx.fillRect(-22, -8, 4, 6);
+            ctx.fillStyle = '#ccc';
+            ctx.fillRect(-28, -10, 16, 2);
+
+            ctx.fillStyle = '#333';
+            ctx.fillRect(18, -8, 4, 6);
+            ctx.fillStyle = '#ccc';
+            ctx.fillRect(12, -10, 16, 2);
+
+            if (isThrusting) {
+                ctx.fillStyle = '#ffa500';
+                ctx.beginPath(); ctx.moveTo(-20, 4); ctx.lineTo(-24, 15); ctx.lineTo(-16, 15); ctx.fill();
+                ctx.beginPath(); ctx.moveTo(20, 4); ctx.lineTo(16, 15); ctx.lineTo(24, 15); ctx.fill();
+            }
+
+            if (isReversing) {
+                ctx.fillStyle = '#00f0ff';
+                ctx.beginPath(); ctx.moveTo(-20, -10); ctx.lineTo(-24, -20); ctx.lineTo(-16, -20); ctx.fill();
+                ctx.beginPath(); ctx.moveTo(20, -10); ctx.lineTo(16, -20); ctx.lineTo(24, -20); ctx.fill();
+            }
+
+            ctx.restore();
+        }
+
+        function render(data) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Thruster flames: in human mode use local key state; in agent/watch
+            // mode the server sends the chosen controls in data.ctrl.
+            const thrusting = data.ctrl ? data.ctrl.thrust  : keys.thrust;
+            const reversing = data.ctrl ? data.ctrl.reverse : keys.reverse;
+
+            drawDroneProfile(data.target.x, data.target.y, -Math.PI/2, '#ff4757', false, false);
+            drawDroneProfile(data.drone.x, data.drone.y, data.drone.angle, '#1e90ff', thrusting, reversing);
+
+            document.getElementById('distVal').innerText = data.state.distance.toFixed(2);
+            document.getElementById('angleVal').innerText = data.state.relative_angle.toFixed(4);
+            document.getElementById('droneX').innerText = data.drone.x.toFixed(1);
+            document.getElementById('droneY').innerText = data.drone.y.toFixed(1);
+
+            updateTrainHud(data.train);
+        }
+
+        function updateTrainHud(t) {
+            const hud = document.getElementById('trainHud');
+            if (!t) { hud.style.display = 'none'; return; }
+            hud.style.display = 'flex';
+            document.getElementById('hudPhase').innerText = t.phase;
+            document.getElementById('hudEp').innerText = `${t.episode}/${t.total}`;
+            document.getElementById('hudSucc').innerText =
+                (t.success != null) ? (t.success * 100).toFixed(0) + '%' : '-';
+            document.getElementById('hudEps').innerText = (t.eps != null) ? t.eps.toFixed(2) : '-';
+            const res = document.getElementById('hudResult');
+            if (t.result) {
+                res.innerText = t.result;
+                res.style.color = t.result === 'INTERCEPT' ? '#2ecc71'
+                                : t.result === 'CRASH' ? '#ff4757' : '#f1c40f';
+            } else {
+                res.innerText = '';
+            }
+        }
+
+        connect();
+    </script>
+</body>
+</html>
