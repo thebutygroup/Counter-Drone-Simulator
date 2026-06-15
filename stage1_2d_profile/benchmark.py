@@ -1,7 +1,7 @@
 """
 benchmark.py  (stage 1: 2D profile view)
 ========================================
-Apples-to-apples comparison of the TABULAR Q agent vs the NEURAL (DQN) agent.
+Apples-to-apples comparison of the available agents: TABULAR Q, DQN, and PPO.
 
 Both agents are evaluated on the *same seeded episodes* (identical target spawns
 and physics), so any difference is the policy alone. For each agent it records:
@@ -37,6 +37,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 Q_POLICY = os.path.join(HERE, "q_policy.npz")
 Q_CKPT = os.path.join(HERE, "checkpoint.npz")
 DQN_POLICY = os.path.join(HERE, "dqn_policy.zip")
+PPO_POLICY = os.path.join(HERE, "ppo_policy.zip")
 RESULTS_CSV = os.path.join(HERE, "benchmark_results.csv")
 
 FIELDS = ["timestamp", "agent", "label", "regime", "episodes",
@@ -98,8 +99,23 @@ def load_dqn():
     return policy_fn, size
 
 
-# ---------------------------------------------------------------------------
-# Evaluation on identical seeded episodes
+def load_ppo():
+    if not os.path.exists(PPO_POLICY):
+        return None
+    from stable_baselines3 import PPO          # lazy: only needed if model present
+    model = PPO.load(PPO_POLICY)
+    n_params = int(sum(p.numel() for p in model.policy.parameters()))
+    size = {
+        "params": n_params, "params_total": n_params,
+        "disk_kb": round(os.path.getsize(PPO_POLICY) / 1024, 1),
+        "train_size": int(getattr(model, "num_timesteps", 0)), "train_unit": "timesteps",
+    }
+
+    def policy_fn(obs):
+        action, _ = model.predict(_wrap_obs(obs), deterministic=True)
+        return int(action)
+
+    return policy_fn, size
 # ---------------------------------------------------------------------------
 def run_eval(policy_fn, evasion, episodes):
     wins = crashes = timeouts = 0
@@ -189,6 +205,11 @@ def main():
         agents.append(("dqn", *dqn))
     else:
         print("(no dqn_policy.zip -> skipping DQN)")
+    ppo = load_ppo()
+    if ppo:
+        agents.append(("ppo", *ppo))
+    else:
+        print("(no ppo_policy.zip -> skipping PPO)")
 
     if not agents:
         sys.exit("No models found to benchmark.")

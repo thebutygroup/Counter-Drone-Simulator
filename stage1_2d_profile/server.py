@@ -6,7 +6,8 @@ WebSocket bridge between the browser viewer and the simulation.
 Modes:
   python server.py                  -> human play (arrow keys)
   python server.py --agent          -> watch the TABULAR policy (q_policy.npz)
-  python server.py --agent --dqn    -> watch the NEURAL policy (dqn_policy.zip)
+  python server.py --agent --dqn    -> watch the DQN policy   (dqn_policy.zip)
+  python server.py --agent --ppo    -> watch the PPO policy   (ppo_policy.zip)
   python server.py --agent --batch 50   -> show "/50" as the batch denominator
 
 In agent mode the browser HUD shows live batch stats (episode count + cumulative
@@ -28,6 +29,7 @@ from drone_core import DroneSimulator
 HERE = os.path.dirname(os.path.abspath(__file__))
 Q_POLICY = os.path.join(HERE, "q_policy.npz")
 DQN_POLICY = os.path.join(HERE, "dqn_policy")     # SB3 appends .zip
+PPO_POLICY = os.path.join(HERE, "ppo_policy")     # SB3 appends .zip
 
 
 async def human_handler(websocket):
@@ -50,31 +52,41 @@ async def human_handler(websocket):
         pass
 
 
-def load_policy(use_dqn):
-    """Return (act_fn, name). act_fn(raw_obs) -> action index."""
-    if use_dqn:
+def _sb3_act(model):
+    """Wrap an SB3 model (DQN or PPO) into act(raw_obs) -> action index.
+    Applies the same heading wrap the policy saw at training time, and selects
+    deterministically (greedy) for a clean watch/eval."""
+    def act(obs):
+        o = obs.astype("float32").copy()
+        o[2] = (o[2] + math.pi) % (2 * math.pi) - math.pi    # match training obs
+        a, _ = model.predict(o, deterministic=True)
+        return int(a)
+    return act
+
+
+def load_policy(kind):
+    """kind in {'tabular','dqn','ppo'}. Return (act_fn, name)."""
+    if kind == "dqn":
         if not os.path.exists(DQN_POLICY + ".zip"):
             sys.exit(f"No DQN model at {DQN_POLICY}.zip -- train it with train_dqn.py first.")
         from stable_baselines3 import DQN
-        model = DQN.load(DQN_POLICY)
-
-        def act(obs):
-            o = obs.astype("float32").copy()
-            o[2] = (o[2] + math.pi) % (2 * math.pi) - math.pi    # match training obs
-            a, _ = model.predict(o, deterministic=True)
-            return int(a)
-        return act, "DQN"
-    else:
-        if not os.path.exists(Q_POLICY):
-            sys.exit(f"No tabular model at {Q_POLICY} -- train it with train.py first.")
-        from qlearn import GreedyAgent
-        agent = GreedyAgent.load(Q_POLICY)
-        return agent.act, "TABULAR"
+        return _sb3_act(DQN.load(DQN_POLICY)), "DQN"
+    if kind == "ppo":
+        if not os.path.exists(PPO_POLICY + ".zip"):
+            sys.exit(f"No PPO model at {PPO_POLICY}.zip -- train it with train_ppo.py first.")
+        from stable_baselines3 import PPO
+        return _sb3_act(PPO.load(PPO_POLICY)), "PPO"
+    # tabular
+    if not os.path.exists(Q_POLICY):
+        sys.exit(f"No tabular model at {Q_POLICY} -- train it with train.py first.")
+    from qlearn import GreedyAgent
+    agent = GreedyAgent.load(Q_POLICY)
+    return agent.act, "TABULAR"
 
 
-def make_agent_handler(use_dqn, batch):
+def make_agent_handler(kind, batch):
     from drone_env import DroneInterceptEnv, ACTIONS
-    act, name = load_policy(use_dqn)
+    act, name = load_policy(kind)
     total = batch if batch > 0 else "∞"
 
     async def agent_handler(websocket):
@@ -145,13 +157,18 @@ async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--agent", action="store_true")
     ap.add_argument("--dqn", action="store_true", help="use dqn_policy.zip (implies --agent)")
+    ap.add_argument("--ppo", action="store_true", help="use ppo_policy.zip (implies --agent)")
     ap.add_argument("--batch", type=int, default=0, help="batch size shown as the denominator")
     args = ap.parse_args()
 
-    agent_mode = args.agent or args.dqn
+    if args.dqn and args.ppo:
+        sys.exit("Pass only one of --dqn / --ppo.")
+
+    agent_mode = args.agent or args.dqn or args.ppo
     if agent_mode:
-        handler = make_agent_handler(args.dqn, args.batch)
-        label = "AGENT/DQN" if args.dqn else "AGENT/TABULAR"
+        kind = "ppo" if args.ppo else "dqn" if args.dqn else "tabular"
+        handler = make_agent_handler(kind, args.batch)
+        label = f"AGENT/{kind.upper()}"
     else:
         handler = human_handler
         label = "HUMAN"
