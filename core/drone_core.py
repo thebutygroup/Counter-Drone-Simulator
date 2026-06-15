@@ -11,8 +11,8 @@ the game renders. If you retune a constant, do it here and both stay in sync.
 import math
 import random
 
-WIDTH, HEIGHT = 800, 600
-DRONE_RADIUS = 30
+WIDTH, HEIGHT = 600, 400
+DRONE_RADIUS = 20
 
 # ---------------------------------------------------------------------------
 # Target evasion AI -- tuning knobs (see comments in DroneSimulator.step)

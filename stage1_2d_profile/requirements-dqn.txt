@@ -1,0 +1,3 @@
+# Deep-RL extras for train_dqn.py (install separately from the base requirements).
+# Pulls in torch, gymnasium, and tensorboard.
+stable-baselines3[extra]

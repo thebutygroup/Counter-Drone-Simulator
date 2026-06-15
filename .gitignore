@@ -1,6 +1,3 @@
-﻿__pycache__/
-*.pyc
-*.pyo
-.DS_Store
-.venv/
-venv/
+﻿stage1_2d_profile/dqn_checkpoints/
+*.zip
+*.npz

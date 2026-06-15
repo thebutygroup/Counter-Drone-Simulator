@@ -16,13 +16,81 @@ Then watch it:
 """
 
 import argparse
+import csv
 import json
 import math
+import os
+import tempfile
 
 import numpy as np
 
 from drone_env import DroneInterceptEnv, N_ACTIONS
 import drone_core
+
+
+# ---------------------------------------------------------------------------
+# Persistence
+# ---------------------------------------------------------------------------
+# Two distinct things get stored:
+#   * q_policy.npz   -> the deployable POLICY (Q-table + config). server.py loads this.
+#   * checkpoint.npz -> full TRAINING STATE (policy + episodes_done + history),
+#                       written periodically so a crash/Ctrl-C is recoverable and
+#                       you can RESUME instead of starting over.
+#   * metrics.csv    -> append-only progress log (success/crash/reward over time),
+#                       so you keep a durable record across runs (open it in Excel).
+# Saves are ATOMIC (write temp -> rename) so an interrupt can't corrupt a file.
+
+def _atomic_savez(path, **arrays):
+    folder = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(dir=folder, suffix=".npz")
+    os.close(fd)
+    try:
+        with open(tmp, "wb") as f:
+            np.savez_compressed(f, **arrays)
+        os.replace(tmp, path)          # atomic on the same filesystem
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def save_checkpoint(path, Q, disc, episodes_done, history, phase=""):
+    """Full training state -> resumable."""
+    _atomic_savez(
+        path,
+        Q=Q,
+        config=json.dumps(disc.config()),
+        episodes_done=np.int64(episodes_done),
+        phase=str(phase),
+        success=np.asarray(history.get("success", []), dtype=np.float32),
+        crash=np.asarray(history.get("crash", []), dtype=np.float32),
+        reward=np.asarray(history.get("reward", []), dtype=np.float32),
+    )
+
+
+def load_checkpoint(path):
+    """Returns (Q, disc, history, meta) for resuming."""
+    d = np.load(path, allow_pickle=True)
+    disc = Discretizer.from_config(json.loads(str(d["config"])))
+    history = {k: list(map(float, d[k])) for k in ("success", "crash", "reward") if k in d}
+    meta = {"episodes_done": int(d["episodes_done"]) if "episodes_done" in d else 0,
+            "phase": str(d["phase"]) if "phase" in d else ""}
+    return d["Q"].copy(), disc, history, meta
+
+
+def _log_metrics_row(path, episode, phase, window):
+    """Append one rolling-summary row to a CSV (header written on first use)."""
+    is_new = not os.path.exists(path)
+    s = window["success"]; c = window["crash"]; r = window["reward"]
+    with open(path, "a", newline="") as f:
+        w = csv.writer(f)
+        if is_new:
+            w.writerow(["episode", "phase", "success_rate", "crash_rate",
+                        "mean_reward", "epsilon"])
+        w.writerow([episode, phase,
+                    round(float(np.mean(s)), 4) if s else "",
+                    round(float(np.mean(c)), 4) if c else "",
+                    round(float(np.mean(r)), 3) if r else "",
+                    round(window["eps"], 3)])
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +154,7 @@ class GreedyAgent:
         return int(np.argmax(self.Q[self.disc.index(obs)]))
 
     def save(self, path):
-        np.savez_compressed(path, Q=self.Q, config=json.dumps(self.disc.config()))
+        _atomic_savez(path, Q=self.Q, config=json.dumps(self.disc.config()))
 
     @classmethod
     def load(cls, path):
@@ -100,13 +168,28 @@ class GreedyAgent:
 # ---------------------------------------------------------------------------
 def train(episodes, evasion, target_speed=drone_core.TARGET_SPEED,
           alpha=0.2, gamma=0.99, eps_start=1.0, eps_end=0.05,
-          Q=None, disc=None, seed=0, log_every=500, label=""):
+          Q=None, disc=None, seed=0, log_every=500, label="",
+          ckpt_path=None, ckpt_every=0, metrics_csv=None,
+          prior_history=None, episode_offset=0):
+    """Train `episodes` episodes.
+
+    Resumable-friendly extras:
+      ckpt_path/ckpt_every : write a full checkpoint every N episodes (atomic).
+      metrics_csv          : append a rolling-summary row at each checkpoint.
+      prior_history        : history to PREPEND (so checkpoints stay cumulative
+                             across curriculum phases / resumes).
+      episode_offset       : global episode number of the first episode here.
+    """
     disc = disc or build_discretizer()
     if Q is None:
         Q = np.zeros((disc.n_states, N_ACTIONS), dtype=np.float32)
     env = DroneInterceptEnv(evasion=evasion, target_speed=target_speed, seed=seed)
 
-    successes, rewards, crashes = [], [], []
+    ph = prior_history or {}
+    successes = list(ph.get("success", []))
+    crashes = list(ph.get("crash", []))
+    rewards = list(ph.get("reward", []))
+
     for ep in range(episodes):
         eps = eps_end + (eps_start - eps_end) * (1 - ep / max(1, episodes))
         obs = env.reset()
@@ -126,21 +209,36 @@ def train(episodes, evasion, target_speed=drone_core.TARGET_SPEED,
         crashes.append(1.0 if info["crashed"] else 0.0)
         rewards.append(ep_r)
 
+        global_ep = episode_offset + ep + 1
+        history = {"success": successes, "reward": rewards, "crash": crashes}
+
         if log_every and (ep + 1) % log_every == 0:
-            sr = np.mean(successes[-log_every:])
-            cr = np.mean(crashes[-log_every:])
-            mr = np.mean(rewards[-log_every:])
-            print(f"  [{label}] ep {ep+1:5d}  eps={eps:.2f}  "
-                  f"success={sr:5.1%}  crash={cr:5.1%}  meanR={mr:7.2f}")
+            w = log_every
+            print(f"  [{label}] ep {global_ep:6d}  eps={eps:.2f}  "
+                  f"success={np.mean(successes[-w:]):5.1%}  "
+                  f"crash={np.mean(crashes[-w:]):5.1%}  "
+                  f"meanR={np.mean(rewards[-w:]):7.2f}")
+
+        if ckpt_every and global_ep % ckpt_every == 0:
+            if ckpt_path:
+                save_checkpoint(ckpt_path, Q, disc, global_ep, history, phase=label)
+            if metrics_csv:
+                w = ckpt_every
+                _log_metrics_row(metrics_csv, global_ep, label,
+                                 {"success": successes[-w:], "crash": crashes[-w:],
+                                  "reward": rewards[-w:], "eps": eps})
+
     return Q, disc, {"success": successes, "reward": rewards, "crash": crashes}
 
 
-def run_curriculum(total_episodes, seed=0):
+def run_curriculum(total_episodes, seed=0, ckpt_path=None, ckpt_every=500,
+                   metrics_csv=None):
     """Three stages, each building on the last:
        Phase 0 SURVIVE - no target pressure (closing reward off); just learn to
                          fly and stop crashing into walls.
        Phase 1 CATCH   - closing reward on; intercept a non-evading target.
-       Phase 2 EVADE   - harden against the evading target."""
+       Phase 2 EVADE   - harden against the evading target.
+    Checkpoints + metrics are written continuously if paths are given."""
     import drone_env
     disc = build_discretizer()
 
@@ -148,21 +246,44 @@ def run_curriculum(total_episodes, seed=0):
     n1 = int(total_episodes * 0.35)
     n2 = total_episodes - n0 - n1
 
+    common = dict(ckpt_path=ckpt_path, ckpt_every=ckpt_every, metrics_csv=metrics_csv)
+
     print(f"Phase 0: {n0} episodes (SURVIVE - learn to fly)")
     drone_env.CLOSING_SCALE = 0.0
-    Q, disc, h0 = train(n0, evasion=False, disc=disc, seed=seed, label="survive")
+    Q, disc, hist = train(n0, evasion=False, disc=disc, seed=seed, label="survive",
+                          episode_offset=0, **common)
 
     print(f"Phase 1: {n1} episodes (CATCH - non-evading target)")
     drone_env.CLOSING_SCALE = 0.10
-    Q, disc, h1 = train(n1, evasion=False, Q=Q, disc=disc, seed=seed + 1,
-                        eps_start=0.5, label="catch")
+    Q, disc, hist = train(n1, evasion=False, Q=Q, disc=disc, seed=seed + 1,
+                          eps_start=0.5, label="catch",
+                          prior_history=hist, episode_offset=n0, **common)
 
     print(f"Phase 2: {n2} episodes (EVADE - evasion ON)")
-    Q, disc, h2 = train(n2, evasion=True, Q=Q, disc=disc, seed=seed + 2,
-                        eps_start=0.4, label="evade")
+    Q, disc, hist = train(n2, evasion=True, Q=Q, disc=disc, seed=seed + 2,
+                          eps_start=0.4, label="evade",
+                          prior_history=hist, episode_offset=n0 + n1, **common)
 
-    history = {k: h0[k] + h1[k] + h2[k] for k in h0}
-    return Q, disc, history, n0 + n1   # split marker = evasion start
+    return Q, disc, hist, n0 + n1   # split marker = evasion start
+
+
+def continue_training(ckpt_path, episodes, seed=0, ckpt_every=500, metrics_csv=None):
+    """Resume from a checkpoint and train MORE episodes in the hard (EVADE)
+       regime. Returns (Q, disc, history, split)."""
+    import drone_env
+    Q, disc, hist, meta = load_checkpoint(ckpt_path)
+    offset = meta["episodes_done"]
+    print(f"Resuming from {ckpt_path} at episode {offset} "
+          f"({len(hist.get('success', []))} episodes of history)")
+
+    drone_env.CLOSING_SCALE = 0.10
+    Q, disc, hist = train(episodes, evasion=True, Q=Q, disc=disc, seed=seed,
+                          eps_start=0.3, label="evade+",
+                          prior_history=hist, episode_offset=offset,
+                          ckpt_path=ckpt_path, ckpt_every=ckpt_every,
+                          metrics_csv=metrics_csv)
+    # split marker: where evasion-era data begins is unknown post-resume, so use 0
+    return Q, disc, hist, 0
 
 
 def plot_history(history, split, path="training_curve.png"):
