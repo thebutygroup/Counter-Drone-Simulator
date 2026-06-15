@@ -1,32 +1,39 @@
 """
-watch_train.py
-==============
+watch_train.py  (stage 1: 2D profile view)
+==========================================
 Train the interceptor while WATCHING it in the browser.
 
-It trains headless (fast), and every WATCH_EVERY episodes it plays one greedy
-episode to your browser viewer at real-time speed, with a HUD showing the phase,
-episode count, rolling success rate, and the outcome of each demo. So you see
-the agent visibly get better (and watch the difficulty spike when evasion turns
-on). When training finishes it saves q_policy.npz and loops final demos forever.
+Trains headless (fast); every WATCH_EVERY episodes it plays one greedy episode
+to your browser viewer with a HUD (phase / episode / rolling success / epsilon /
+outcome). The on-screen SPEED SLIDER scales playback live. When training
+finishes it saves q_policy.npz and loops final demos.
 
 Run:
-    python watch_train.py        # then open index.html in your browser
+    python watch_train.py        # then open index.html
 """
 
 import asyncio
 import json
+import os
 import random
+import sys
 
 import numpy as np
-import websockets
 
+# --- make the shared engine in ../core importable, regardless of cwd ---------
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "core")))
+
+import websockets
 import drone_env
 from drone_env import DroneInterceptEnv, N_ACTIONS, ACTIONS
 from qlearn import build_discretizer, GreedyAgent
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+POLICY_PATH = os.path.join(HERE, "q_policy.npz")
+
 # --- watch / training schedule ----------------------------------------------
 TOTAL = 6000          # total training episodes
-WATCH_EVERY = 120     # stream one live demo episode every N training episodes
+WATCH_EVERY = 40      # stream a live demo every N training episodes (lower = more demos)
 ALPHA, GAMMA = 0.2, 0.99
 
 # 3-phase curriculum: (label, fraction, evasion, closing_scale, eps_start)
@@ -38,7 +45,6 @@ PHASES = [
 
 
 def train_one_episode(env, Q, disc, eps):
-    """One headless Q-learning episode. Returns the terminal info dict."""
     obs = env.reset()
     s = disc.index(obs)
     done = False
@@ -51,8 +57,8 @@ def train_one_episode(env, Q, disc, eps):
     return info
 
 
-async def stream_demo(ws, Q, disc, evasion, meta):
-    """Play one GREEDY episode to the browser at ~60fps."""
+async def stream_demo(ws, Q, disc, evasion, meta, state):
+    """Play one GREEDY episode at a frame rate scaled by the live speed slider."""
     env = DroneInterceptEnv(evasion=evasion, seed=random.randint(0, 1 << 30))
     obs = env.reset()
     done = False
@@ -66,21 +72,31 @@ async def stream_demo(ws, Q, disc, evasion, meta):
                          "reverse": bool(ctrl.get("reverse"))}
         frame["train"] = meta
         await ws.send(json.dumps(frame))
-        await asyncio.sleep(1 / 60)
+        await asyncio.sleep((1 / 60) / state["speed"])
 
-    # Flash the outcome on the last frame, then pause so it's readable.
     result = "INTERCEPT" if info.get("success") else (
         "CRASH" if info.get("crashed") else "TIMEOUT")
     frame["train"] = {**meta, "result": result}
     await ws.send(json.dumps(frame))
-    await asyncio.sleep(0.7)
+    await asyncio.sleep(0.7 / state["speed"])
 
 
 async def handler(ws):
     disc = build_discretizer()
     Q = np.zeros((disc.n_states, N_ACTIONS), dtype=np.float32)
-    recent = []
-    ep_global = 0
+    recent, ep_global = [], 0
+    state = {"speed": 1.0}
+
+    async def reader():
+        try:
+            async for msg in ws:
+                d = json.loads(msg)
+                if "speed" in d:
+                    state["speed"] = max(0.1, float(d["speed"]))
+        except Exception:
+            pass
+
+    reader_task = asyncio.create_task(reader())
     print("Browser connected -- training has begun. Watch the demos roll in.")
 
     try:
@@ -100,19 +116,21 @@ async def handler(ws):
                     meta = {"phase": name, "episode": ep_global, "total": TOTAL,
                             "success": round(float(np.mean(recent)), 3),
                             "eps": round(eps, 2)}
-                    await stream_demo(ws, Q, disc, evasion, meta)
+                    await stream_demo(ws, Q, disc, evasion, meta, state)
                 elif i % 40 == 0:
-                    await asyncio.sleep(0)   # yield so the socket stays alive
+                    await asyncio.sleep(0)   # yield so the speed reader stays live
 
-        GreedyAgent(Q, disc).save("q_policy.npz")
-        print("Training done -> saved q_policy.npz. Looping final demos.")
+        GreedyAgent(Q, disc).save(POLICY_PATH)
+        print(f"Training done -> saved {POLICY_PATH}. Looping final demos.")
         while True:
             meta = {"phase": "DONE", "episode": TOTAL, "total": TOTAL,
                     "success": round(float(np.mean(recent)), 3), "eps": 0.0}
-            await stream_demo(ws, Q, disc, True, meta)
+            await stream_demo(ws, Q, disc, True, meta, state)
 
     except websockets.exceptions.ConnectionClosed:
         print("Browser disconnected -- stopping this training run.")
+    finally:
+        reader_task.cancel()
 
 
 async def main():

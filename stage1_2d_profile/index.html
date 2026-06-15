@@ -11,6 +11,10 @@
         #logArea { height: 120px; overflow-y: auto; background: #000; color: #0f0; font-size: 12px; padding: 10px; border: 1px solid #444; border-radius: 4px; margin-top: 10px;}
         #resetBtn { margin: 8px; padding: 8px 18px; font-size: 14px; cursor: pointer; background: #ff4757; color: #fff; border: none; border-radius: 4px; }
         #resetBtn:hover { background: #ff6b78; }
+        #speedControl { display: inline-flex; align-items: center; gap: 8px; margin-left: 14px;
+            font-family: monospace; font-size: 14px; vertical-align: middle; }
+        #speedSlider { vertical-align: middle; }
+        #speedVal { display: inline-block; width: 44px; color: #4a90d9; font-weight: bold; }
         #trainHud { display: none; width: 800px; margin: 6px auto 0; padding: 10px 14px;
             background: #2a2a35; border: 1px solid #4a90d9; border-radius: 5px;
             font-family: monospace; font-size: 14px; text-align: left;
@@ -25,6 +29,10 @@
     <p>Controls: <b>Up</b> to thrust, <b>Down</b> to reverse/dive, <b>Left/Right</b> to pitch, <b>R</b> to reset.</p>
 
     <button id="resetBtn">Reset (R)</button>
+    <span id="speedControl">
+        Playback: <input id="speedSlider" type="range" min="0.25" max="8" step="0.25" value="1">
+        <span id="speedVal">1.0x</span>
+    </span>
 
     <div id="trainHud">
         <span class="hudItem">Phase: <b id="hudPhase">-</b></span>
@@ -76,7 +84,11 @@
         function connect() {
             ws = new WebSocket('ws://localhost:8765');
 
-            ws.onopen = () => sysLog('WebSocket CONNECTED to Python Server');
+            ws.onopen = () => {
+                sysLog('WebSocket CONNECTED to Python Server');
+                const s = document.getElementById('speedSlider');
+                if (s) send({ speed: parseFloat(s.value) });
+            };
             ws.onerror = () => { sysLog('<span style="color:red">WebSocket ERROR</span>'); };
             ws.onclose = () => {
                 sysLog('<span style="color:red">DISCONNECTED - retrying in 1s...</span>');
@@ -108,6 +120,14 @@
             sysLog('OUT: RESET requested');
         }
         document.getElementById('resetBtn').addEventListener('click', requestReset);
+
+        // --- Playback speed slider: scales server-side pacing in agent/watch modes ---
+        const speedSlider = document.getElementById('speedSlider');
+        speedSlider.addEventListener('input', () => {
+            const v = parseFloat(speedSlider.value);
+            document.getElementById('speedVal').innerText = v.toFixed(2).replace(/0$/, '') + 'x';
+            send({ speed: v });
+        });
 
         window.addEventListener('keydown', (e) => {
             if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) {
@@ -146,7 +166,9 @@
         function drawDroneProfile(x, y, angle, bodyColor, isThrusting, isReversing) {
             ctx.save();
             ctx.translate(x, y);
-            ctx.rotate(angle + Math.PI);
+            // +PI/2 so the sprite's "up" (rotors / thrust-out side) aligns with
+            // the physics heading. angle = -PI/2 (thrust up) -> sprite drawn level.
+            ctx.rotate(angle + Math.PI / 2);
 
             ctx.fillStyle = '#555';
             ctx.fillRect(-20, -2, 40, 4);
