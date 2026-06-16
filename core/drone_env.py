@@ -96,7 +96,7 @@ OBSTACLE_PROX_COEF = 0.20      # per-frame penalty strength at the obstacle surf
 
 
 class DroneInterceptEnv:
-    def __init__(self, evasion=True, target_speed=drone_core.TARGET_SPEED,
+    def __init__(self, evasion=True, config=None,
                  wall_terminates=WALL_TERMINATES, seed=None,
                  n_obstacles=0, perception="none", perception_kwargs=None,
                  continuous=False):
@@ -105,8 +105,13 @@ class DroneInterceptEnv:
         rng = random.Random(seed)
         self.rng = rng
         self.continuous = continuous
-        self.sim = DroneSimulator(evasion=evasion, target_speed=target_speed, rng=rng,
-                                  n_obstacles=n_obstacles)
+        self.cfg = config or drone_core.cfg
+        self.sim = DroneSimulator(
+                    config=self.cfg, 
+                    evasion=evasion, 
+                    rng=rng, 
+                    n_obstacles=n_obstacles
+                )
         self.wall_terminates = wall_terminates
         self.perception = make_perception(perception, **(perception_kwargs or {}))
         self._last_frame = None
