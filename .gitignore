@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 ﻿__pycache__/
+=======
+__pycache__/
+>>>>>>> e157a6bb2afa3002a11c0bfc78c273d12d440445
 *.pyc
 *.pyo
 .DS_Store
@@ -8,4 +12,8 @@ stage1_2d_profile/dqn_checkpoints/
 stage1_2d_profile/ppo_checkpoints/
 *.zip
 *.npz
+<<<<<<< HEAD
 !stage1_2d_profile/q_policy.npz
+=======
+!stage1_2d_profile/q_policy.npz
+>>>>>>> e157a6bb2afa3002a11c0bfc78c273d12d440445
