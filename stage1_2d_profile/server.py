@@ -26,7 +26,7 @@ import numpy as np
 # --- make the shared engine in ../core importable, regardless of cwd ---------
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "core")))
 
-from drone_core import DroneSimulator
+from drone_core import DroneSimulator, cfg
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 Q_POLICY = os.path.join(HERE, "q_policy.npz")
@@ -36,7 +36,7 @@ PPO_POLICY = os.path.join(HERE, "ppo_policy")     # SB3 appends .zip
 
 def make_human_handler(n_obstacles=0):
     async def human_handler(websocket):
-        sim = DroneSimulator(n_obstacles=n_obstacles)
+        sim = DroneSimulator(config=cfg, evasion=True, n_obstacles=n_obstacles)
         actions = {"thrust": False, "reverse": False, "left": False, "right": False}
         try:
             while True:
