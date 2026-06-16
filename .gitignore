@@ -1,3 +1,11 @@
-﻿stage1_2d_profile/dqn_checkpoints/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.venv/
+venv/
+stage1_2d_profile/dqn_checkpoints/
+stage1_2d_profile/ppo_checkpoints/
 *.zip
 *.npz
+!stage1_2d_profile/q_policy.npz
