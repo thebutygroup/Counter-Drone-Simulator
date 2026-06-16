@@ -1,0 +1,7 @@
+timestamp,agent,label,regime,episodes,success_rate,crash_rate,escape_rate,timeout_rate,avg_catch_frames,avg_impact_speed,avg_backside_rate,params,disk_kb,infer_us,decisions_per_sec,train_size,train_unit,success_per_100k_params
+2026-06-16T11:37:27,tabular,cont-v1,evade,1000,0.0,0.328,0.672,0.0,,,,72510,344.0,34.18,29253,10320,episodes,0.0
+2026-06-16T11:37:27,tabular,cont-v1,non-evade,1000,0.333,0.666,0.0,0.001,116.9,6.96,0.44,72510,344.0,34.18,29253,10320,episodes,0.459
+2026-06-16T11:37:27,dqn,cont-v1,evade,1000,0.0,0.319,0.681,0.0,,,,140302,1122.3,193.61,5165,600000,timesteps,0.0
+2026-06-16T11:37:27,dqn,cont-v1,non-evade,1000,0.407,0.585,0.0,0.008,134.7,7.08,0.509,140302,1122.3,193.61,5165,600000,timesteps,0.29
+2026-06-16T11:37:27,ppo,cont-v1,evade,1000,0.078,0.134,0.783,0.005,97.3,2.14,0.926,137477,1644.6,276.11,3621,3031040,timesteps,0.057
+2026-06-16T11:37:27,ppo,cont-v1,non-evade,1000,0.873,0.113,0.0,0.014,119.6,10.35,0.915,137477,1644.6,276.11,3621,3031040,timesteps,0.635

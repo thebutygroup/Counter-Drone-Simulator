@@ -5,7 +5,8 @@
     <title>Drone Intercept - Diagnostic View</title>
     <style>
         body { font-family: sans-serif; background: #1e1e24; color: #fff; text-align: center; }
-        canvas { background: #111; border: 2px solid #444; display: block; margin: 10px auto; }
+        canvas { background: #111; border: 2px solid #444; display: block; margin: 10px auto;
+            box-sizing: border-box; max-width: 96vw; max-height: 72vh; }
         #dashboard { display: flex; justify-content: space-between; width: 800px; margin: 0 auto; gap: 20px;}
         .panel { font-family: monospace; background: #2a2a35; padding: 15px; border-radius: 5px; text-align: left; flex: 1;}
         #logArea { height: 120px; overflow-y: auto; background: #000; color: #0f0; font-size: 12px; padding: 10px; border: 1px solid #444; border-radius: 4px; margin-top: 10px;}
@@ -63,6 +64,8 @@
     <script>
         const canvas = document.getElementById('simCanvas');
         const ctx = canvas.getContext('2d');
+        // Flip to true to see the invisible "escape" wall the target runs for.
+        const SHOW_ESCAPE_ZONE = false;
         const logArea = document.getElementById('logArea');
 
         const keys = { thrust: false, reverse: false, left: false, right: false };
@@ -203,8 +206,70 @@
             ctx.restore();
         }
 
+        // Cap the DISPLAYED canvas size to the viewport while preserving aspect
+        // ratio. The drawing buffer stays at full arena resolution (set in render),
+        // so the browser just scales the finished image down -- nothing in the draw
+        // code needs to know about screen size. Never upscales (scale clamped <= 1),
+        // so a small arena stays crisp. The dashboard + HUD track the shown width.
+        function fitCanvasToViewport() {
+            if (!canvas.width || !canvas.height) return;
+            const maxW = window.innerWidth * 0.96;
+            const maxH = window.innerHeight * 0.72;   // leave room for header/controls/panels
+            const scale = Math.min(maxW / canvas.width, maxH / canvas.height, 1);
+            const dispW = Math.round(canvas.width * scale);
+            const dispH = Math.round(canvas.height * scale);
+            canvas.style.width = dispW + 'px';
+            canvas.style.height = dispH + 'px';
+            const dash = document.getElementById('dashboard');
+            const hud = document.getElementById('trainHud');
+            if (dash) dash.style.width = dispW + 'px';
+            if (hud) hud.style.width = dispW + 'px';
+        }
+        window.addEventListener('resize', fitCanvasToViewport);
+
         function render(data) {
+            // Adapt the canvas (and the fixed-width panels) to whatever arena the
+            // server reports, so a resized arena in drone_core just works.
+            if (data.arena && (canvas.width !== data.arena.w || canvas.height !== data.arena.h)) {
+                canvas.width = data.arena.w;     // drawing buffer = TRUE arena resolution
+                canvas.height = data.arena.h;    // (server coords render 1:1 into the buffer)
+                fitCanvasToViewport();           // then scale the DISPLAYED size to fit the screen
+            }
             ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Optional debug overlay: the invisible wall the target runs for.
+            // Flip SHOW_ESCAPE_ZONE to true to see it.
+            const wallOffset = (data.arena && data.arena.wall_offset) || 0;
+            if (SHOW_ESCAPE_ZONE && wallOffset > 0) {
+                ctx.save();
+                ctx.strokeStyle = 'rgba(230,126,34,0.5)';
+                ctx.setLineDash([8, 6]);
+                ctx.lineWidth = 2;
+                ctx.strokeRect(wallOffset, wallOffset,
+                               canvas.width - 2 * wallOffset, canvas.height - 2 * wallOffset);
+                ctx.restore();
+            }
+
+            // Rough ground obstacles (street lamps, poles, trees, people, dogs).
+            if (data.obstacles && data.obstacles.length) {
+                for (const obs of data.obstacles) {
+                    ctx.strokeStyle = obs.color;
+                    ctx.fillStyle = obs.color;
+                    ctx.lineCap = 'round';
+                    for (const p of obs.render) {
+                        if (p.kind === 'line') {
+                            ctx.lineWidth = Math.max(1, p.w);
+                            ctx.beginPath();
+                            ctx.moveTo(p.x1, p.y1); ctx.lineTo(p.x2, p.y2); ctx.stroke();
+                        } else if (p.kind === 'circle') {
+                            ctx.beginPath();
+                            ctx.arc(p.cx, p.cy, p.r, 0, Math.PI * 2); ctx.fill();
+                        } else if (p.kind === 'rect') {
+                            ctx.fillRect(p.cx - p.hw, p.cy - p.hh, p.hw * 2, p.hh * 2);
+                        }
+                    }
+                }
+            }
 
             // Thruster flames: in human mode use local key state; in agent/watch
             // mode the server sends the chosen controls in data.ctrl.
@@ -235,7 +300,8 @@
             if (t.result) {
                 res.innerText = t.result;
                 res.style.color = t.result === 'INTERCEPT' ? '#2ecc71'
-                                : t.result === 'CRASH' ? '#ff4757' : '#f1c40f';
+                                : t.result === 'CRASH' ? '#ff4757'
+                                : t.result === 'ESCAPE' ? '#e67e22' : '#f1c40f';
             } else {
                 res.innerText = '';
             }

@@ -40,23 +40,40 @@ def _wrap(a):
 class DroneGymEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, evasion=True, closing_scale=0.10, target_speed=None, seed=None, backside_gate=False):
+    def __init__(self, evasion=True, closing_scale=0.10, target_speed=None, seed=None,
+                 n_obstacles=0, perception="none", perception_kwargs=None,
+                 continuous=False):
         super().__init__()
-        self.backside_gate = backside_gate
         self.evasion = evasion
         self.closing_scale = closing_scale
         self.target_speed = target_speed
         self._seed = seed
-        self.observation_space = spaces.Box(_OBS_LOW, _OBS_HIGH, dtype=np.float32)
-        self.action_space = spaces.Discrete(N_ACTIONS)
+        self.n_obstacles = n_obstacles
+        self.perception = perception
+        self.perception_kwargs = perception_kwargs or {}
+        self.continuous = continuous
+        # Continuous: 2-D Box [thrust, turn] in [-1,1] (PPO Gaussian policy).
+        # Discrete: the legacy 7-action set (tabular / DQN / discrete-PPO baseline).
+        if continuous:
+            self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+        else:
+            self.action_space = spaces.Discrete(N_ACTIONS)
         self._build()
-        drone_env.USE_BACKSIDE_GATE = self.backside_gate
+        # Observation space = base 9-D + whatever the chosen perception appends.
+        plo, phi = self.env.perception.bounds()
+        low = np.concatenate([_OBS_LOW, plo]) if plo.size else _OBS_LOW
+        high = np.concatenate([_OBS_HIGH, phi]) if phi.size else _OBS_HIGH
+        self.observation_space = spaces.Box(low, high, dtype=np.float32)
 
     def _build(self):
         kwargs = {}
         if self.target_speed is not None:
             kwargs["target_speed"] = self.target_speed
-        self.env = DroneInterceptEnv(evasion=self.evasion, seed=self._seed, **kwargs)
+        self.env = DroneInterceptEnv(
+            evasion=self.evasion, seed=self._seed,
+            n_obstacles=self.n_obstacles, perception=self.perception,
+            perception_kwargs=self.perception_kwargs, continuous=self.continuous,
+            **kwargs)
 
     def _fix(self, obs):
         obs = np.asarray(obs, dtype=np.float32)
@@ -76,7 +93,8 @@ class DroneGymEnv(gym.Env):
 
     def step(self, action):
         drone_env.CLOSING_SCALE = self.closing_scale          # set reward regime
-        obs, reward, done, info = self.env.step(int(action))
-        terminated = bool(info["success"] or info["crashed"])  # real terminal
+        act = action if self.continuous else int(action)
+        obs, reward, done, info = self.env.step(act)
+        terminated = bool(info["success"] or info["crashed"] or info.get("escaped"))
         truncated = bool(done and not terminated)              # timeout
         return self._fix(obs), float(reward), terminated, truncated, info

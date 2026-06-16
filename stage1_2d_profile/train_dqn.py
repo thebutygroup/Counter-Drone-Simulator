@@ -74,7 +74,7 @@ def make_env(evasion, closing, seed=None):
 def evaluate(model, episodes=300, evasion=True, seed=999):
     env = DroneGymEnv(evasion=evasion, closing_scale=0.10, seed=seed)
     wins = crashes = 0
-    steps, impacts = [], []
+    steps, impacts, backs = [], [], []
     for _ in range(episodes):
         obs, _ = env.reset()
         term = trunc = False
@@ -84,13 +84,15 @@ def evaluate(model, episodes=300, evasion=True, seed=999):
             obs, _, term, trunc, info = env.step(int(action))
         if info.get("success"):
             wins += 1; steps.append(info["steps"]); impacts.append(info["impact_speed"])
+            backs.append(info.get("backside", 0.0))
         elif info.get("crashed"):
             crashes += 1
     sr, cr = wins / episodes, crashes / episodes
     avg = np.mean(steps) if steps else float("nan")
     spd = np.mean(impacts) if impacts else float("nan")
+    bck = np.mean(backs) if backs else float("nan")
     print(f"Eval: success={sr:.1%}  crash={cr:.1%} over {episodes} eps "
-          f"(avg catch {avg:.0f} frames, impact {spd:.1f} px/frame)")
+          f"(avg catch {avg:.0f} frames, impact {spd:.1f} px/frame, backside {bck:.2f})")
     return sr
 
 

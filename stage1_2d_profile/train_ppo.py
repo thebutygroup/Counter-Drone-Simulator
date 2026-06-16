@@ -43,6 +43,7 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from gym_env import DroneGymEnv
+import drone_core
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(HERE, "ppo_policy")          # .zip appended by SB3
@@ -68,48 +69,65 @@ HYPERPARAMS = dict(
     verbose=1,
 )
 
-# curriculum: (label, fraction_of_budget, evasion, closing_scale) -- IDENTICAL to DQN
+# curriculum: (label, fraction_of_budget, evasion, closing_scale, target_frac)
+# target_frac = target speed as a fraction of the chaser's TOP_SPEED. It RAMPS
+# from slow to the full 0.75 so the agent learns against an easy evader first and
+# the difficulty climbs as it improves. Scale the whole ramp with --target-scale.
 CURRICULUM = [
-    ("survive", 0.25, False, 0.0),
-    ("catch",   0.35, False, 0.10),
-    ("evade",   0.40, True,  0.10),
+    ("survive",     0.15, False, 0.00, 0.35),
+    ("catch",       0.20, False, 0.10, 0.45),
+    ("evade-slow",  0.20, True,  0.10, 0.45),
+    ("evade-mid",   0.20, True,  0.10, 0.60),
+    ("evade-full",  0.25, True,  0.10, 0.75),
 ]
 
 
-def make_vec(evasion, closing, n_envs, seed=None):
+def make_vec(evasion, closing, n_envs, seed=None, target_speed=None, n_obstacles=0,
+             perception="none", perception_kwargs=None, continuous=False):
     """A vectorised stack of DroneGymEnvs (Monitor-wrapped by make_vec_env).
     Each sub-env is seeded distinctly so the parallel rollouts aren't identical."""
     return make_vec_env(
         DroneGymEnv,
         n_envs=n_envs,
         seed=seed,
-        env_kwargs=dict(evasion=evasion, closing_scale=closing),
+        env_kwargs=dict(evasion=evasion, closing_scale=closing, target_speed=target_speed,
+                        n_obstacles=n_obstacles, perception=perception,
+                        perception_kwargs=perception_kwargs or {}, continuous=continuous),
         vec_env_cls=DummyVecEnv,   # in-process; robust on Windows. Swap to Subproc for speed.
     )
 
 
-def evaluate(model, episodes=300, evasion=True, seed=999):
+def evaluate(model, episodes=300, evasion=True, seed=999, target_speed=None,
+             n_obstacles=0, perception="none", perception_kwargs=None, continuous=False):
     """Single-env, deterministic eval -- SAME harness as train_dqn.evaluate so the
     numbers line up directly with the DQN run."""
-    env = DroneGymEnv(evasion=evasion, closing_scale=0.10, seed=seed)
-    wins = crashes = 0
-    steps, impacts = [], []
+    env = DroneGymEnv(evasion=evasion, closing_scale=0.10, seed=seed,
+                      target_speed=target_speed, n_obstacles=n_obstacles,
+                      perception=perception, perception_kwargs=perception_kwargs or {},
+                      continuous=continuous)
+    wins = crashes = escapes = 0
+    steps, impacts, backs = [], [], []
     for _ in range(episodes):
         obs, _ = env.reset()
         term = trunc = False
         info = {}
         while not (term or trunc):
             action, _ = model.predict(obs, deterministic=True)
-            obs, _, term, trunc, info = env.step(int(action))
+            act = action if continuous else int(action)
+            obs, _, term, trunc, info = env.step(act)
         if info.get("success"):
             wins += 1; steps.append(info["steps"]); impacts.append(info["impact_speed"])
+            backs.append(info.get("backside", 0.0))
+        elif info.get("escaped"):
+            escapes += 1
         elif info.get("crashed"):
             crashes += 1
-    sr, cr = wins / episodes, crashes / episodes
+    sr, cr, er = wins / episodes, crashes / episodes, escapes / episodes
     avg = np.mean(steps) if steps else float("nan")
     spd = np.mean(impacts) if impacts else float("nan")
-    print(f"Eval: success={sr:.1%}  crash={cr:.1%} over {episodes} eps "
-          f"(avg catch {avg:.0f} frames, impact {spd:.1f} px/frame)")
+    bck = np.mean(backs) if backs else float("nan")
+    print(f"Eval: success={sr:.1%}  crash={cr:.1%}  escape={er:.1%} over {episodes} eps "
+          f"(avg catch {avg:.0f} frames, impact {spd:.1f} px/frame, backside {bck:.2f})")
     return sr
 
 
@@ -121,7 +139,31 @@ def main():
     ap.add_argument("--no-curriculum", action="store_true")
     ap.add_argument("--resume", action="store_true",
                     help="continue from ppo_policy.zip")
+    ap.add_argument("--obstacles", type=int, default=0,
+                    help="spawn 1..N ground obstacles per episode (0 = none)")
+    ap.add_argument("--perception", choices=["none", "rays", "slots"], default="none",
+                    help="how the agent observes obstacles")
+    ap.add_argument("--rays", type=int, default=16, help="ray count (perception=rays)")
+    ap.add_argument("--slots", type=int, default=4, help="entity slots (perception=slots)")
+    ap.add_argument("--target-scale", type=float, default=1.0,
+                    help="multiply every phase's target speed (e.g. 0.6 = slow the evader "
+                         "across the whole curriculum; raise toward 1.0 as the model improves)")
+    ap.add_argument("--target-frac", type=float, default=0.75,
+                    help="target speed fraction for --no-curriculum (single phase)")
+    ap.add_argument("--continuous", action="store_true",
+                    help="use the 2-D continuous Box action [thrust, turn] in [-1,1] "
+                         "(PPO Gaussian policy) instead of the 7 discrete actions")
     args = ap.parse_args()
+
+    pkw = {}
+    if args.perception == "rays":
+        pkw = {"n_rays": args.rays}
+    elif args.perception == "slots":
+        pkw = {"k": args.slots}
+
+    TOP = drone_core.TOP_SPEED
+    def tspeed(frac):
+        return frac * TOP * args.target_scale
 
     os.makedirs(CKPT_DIR, exist_ok=True)
     # save_freq is counted in MODEL steps; divide by n_envs so checkpoints land at
@@ -130,11 +172,15 @@ def main():
         save_freq=max(25_000 // args.n_envs, 1),
         save_path=CKPT_DIR, name_prefix="ppo")
 
-    phases = ([("evade", 1.0, True, 0.10)] if args.no_curriculum else CURRICULUM)
+    phases = ([("evade", 1.0, True, 0.10, args.target_frac)]
+              if args.no_curriculum else CURRICULUM)
 
     # Build or load the model on the first phase's vec env.
     first = phases[0]
-    venv0 = make_vec(evasion=first[2], closing=first[3], n_envs=args.n_envs, seed=args.seed)
+    venv0 = make_vec(evasion=first[2], closing=first[3], n_envs=args.n_envs, seed=args.seed,
+                     target_speed=tspeed(first[4]), n_obstacles=args.obstacles,
+                     perception=args.perception, perception_kwargs=pkw,
+                     continuous=args.continuous)
     if args.resume and os.path.exists(MODEL_PATH + ".zip"):
         print(f"Resuming from {MODEL_PATH}.zip")
         model = PPO.load(MODEL_PATH, env=venv0)
@@ -142,22 +188,32 @@ def main():
         model = PPO(env=venv0, seed=args.seed, **HYPERPARAMS)
 
     # Run the curriculum: keep the same model, swap the vec env per phase.
-    for i, (label, frac, evasion, closing) in enumerate(phases):
+    for i, (label, frac, evasion, closing, tfrac) in enumerate(phases):
         steps = int(args.timesteps * frac)
+        ts = tspeed(tfrac)
         print(f"\n=== Phase '{label}': {steps} steps "
-              f"(evasion={evasion}, closing={closing}, n_envs={args.n_envs}) ===")
+              f"(evasion={evasion}, closing={closing}, target={ts:.1f}px/f "
+              f"[{tfrac:.2f}x top], n_envs={args.n_envs}, "
+              f"obstacles={args.obstacles}, perception={args.perception}) ===")
         if i > 0:
-            model.set_env(make_vec(evasion=evasion, closing=closing,
-                                   n_envs=args.n_envs, seed=args.seed + i))
+            model.set_env(make_vec(evasion=evasion, closing=closing, n_envs=args.n_envs,
+                                   seed=args.seed + i, target_speed=ts,
+                                   n_obstacles=args.obstacles,
+                                   perception=args.perception, perception_kwargs=pkw,
+                                   continuous=args.continuous))
         model.learn(total_timesteps=steps, callback=checkpoint_cb,
                     reset_num_timesteps=(i == 0 and not args.resume),
                     log_interval=20)
         model.save(MODEL_PATH)
         print(f"saved -> {MODEL_PATH}.zip")
 
-    print("\n--- final eval ---")
-    evaluate(model, evasion=True)
-    evaluate(model, evasion=False)
+    # Eval at the FULL final difficulty the curriculum trained up to.
+    full_ts = tspeed(phases[-1][4])
+    print(f"\n--- final eval (target {full_ts:.1f}px/f = {phases[-1][4]*args.target_scale:.2f}x top) ---")
+    evaluate(model, evasion=True, target_speed=full_ts, n_obstacles=args.obstacles,
+             perception=args.perception, perception_kwargs=pkw, continuous=args.continuous)
+    evaluate(model, evasion=False, target_speed=full_ts, n_obstacles=args.obstacles,
+             perception=args.perception, perception_kwargs=pkw, continuous=args.continuous)
 
 
 if __name__ == "__main__":

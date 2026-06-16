@@ -41,8 +41,8 @@ PPO_POLICY = os.path.join(HERE, "ppo_policy.zip")
 RESULTS_CSV = os.path.join(HERE, "benchmark_results.csv")
 
 FIELDS = ["timestamp", "agent", "label", "regime", "episodes",
-          "success_rate", "crash_rate", "timeout_rate",
-          "avg_catch_frames", "avg_impact_speed",
+          "success_rate", "crash_rate", "escape_rate", "timeout_rate",
+          "avg_catch_frames", "avg_impact_speed", "avg_backside_rate",
           "params", "disk_kb", "infer_us", "decisions_per_sec",
           "train_size", "train_unit", "success_per_100k_params"]
 
@@ -103,25 +103,30 @@ def load_ppo():
     if not os.path.exists(PPO_POLICY):
         return None
     from stable_baselines3 import PPO          # lazy: only needed if model present
+    from gymnasium.spaces import Box
     model = PPO.load(PPO_POLICY)
+    continuous = isinstance(model.action_space, Box)
     n_params = int(sum(p.numel() for p in model.policy.parameters()))
     size = {
         "params": n_params, "params_total": n_params,
         "disk_kb": round(os.path.getsize(PPO_POLICY) / 1024, 1),
         "train_size": int(getattr(model, "num_timesteps", 0)), "train_unit": "timesteps",
+        "continuous": continuous,
     }
 
     def policy_fn(obs):
         action, _ = model.predict(_wrap_obs(obs), deterministic=True)
-        return int(action)
+        # Box -> pass the float [thrust, turn] vector straight to the env;
+        # Discrete -> the env wants an int index.
+        return np.asarray(action, dtype=np.float32) if continuous else int(action)
 
     return policy_fn, size
 # ---------------------------------------------------------------------------
-def run_eval(policy_fn, evasion, episodes):
-    wins = crashes = timeouts = 0
-    catch_frames, impacts = [], []
+def run_eval(policy_fn, evasion, episodes, continuous=False):
+    wins = crashes = escapes = timeouts = 0
+    catch_frames, impacts, backs = [], [], []
     for s in range(episodes):
-        env = DroneInterceptEnv(evasion=evasion, seed=s)   # same seed -> same scenario
+        env = DroneInterceptEnv(evasion=evasion, seed=s, continuous=continuous)   # same seed -> same scenario
         obs = env.reset()
         done = False
         info = {}
@@ -129,6 +134,9 @@ def run_eval(policy_fn, evasion, episodes):
             obs, _, done, info = env.step(policy_fn(obs))
         if info["success"]:
             wins += 1; catch_frames.append(info["steps"]); impacts.append(info["impact_speed"])
+            backs.append(info.get("backside", 0.0))
+        elif info.get("escaped"):
+            escapes += 1
         elif info["crashed"]:
             crashes += 1
         else:
@@ -137,16 +145,18 @@ def run_eval(policy_fn, evasion, episodes):
     return {
         "success_rate": wins / n,
         "crash_rate": crashes / n,
+        "escape_rate": escapes / n,
         "timeout_rate": timeouts / n,
         "avg_catch_frames": round(float(np.mean(catch_frames)), 1) if catch_frames else "",
         "avg_impact_speed": round(float(np.mean(impacts)), 2) if impacts else "",
+        "avg_backside_rate": round(float(np.mean(backs)), 3) if backs else "",
     }
 
 
-def measure_latency(policy_fn, samples=2000):
+def measure_latency(policy_fn, samples=2000, continuous=False):
     """Time per-decision inference on representative observations."""
     obs_pool = []
-    env = DroneInterceptEnv(evasion=True, seed=12345)
+    env = DroneInterceptEnv(evasion=True, seed=12345, continuous=continuous)
     obs = env.reset(); done = False
     while len(obs_pool) < samples:
         obs_pool.append(obs)
@@ -173,8 +183,9 @@ def persist(rows):
 
 
 def print_table(rows):
-    cols = [("agent", 9), ("regime", 11), ("success_rate", 8), ("crash_rate", 7),
-            ("avg_catch_frames", 9), ("params", 10), ("disk_kb", 8),
+    cols = [("agent", 9), ("regime", 11), ("success_rate", 8), ("crash_rate", 7), ("escape_rate", 7),
+            ("avg_catch_frames", 9), ("avg_impact_speed", 9), ("avg_backside_rate", 9),
+            ("params", 10), ("disk_kb", 8),
             ("infer_us", 9), ("decisions_per_sec", 11), ("success_per_100k_params", 10)]
     header = "  ".join(name.replace("_", " ")[:w].ljust(w) for name, w in cols)
     print("\n" + header); print("-" * len(header))
@@ -218,10 +229,11 @@ def main():
     rows = []
     for name, policy_fn, size in agents:
         print(f"\nBenchmarking '{name}' over {args.episodes} episodes/regime ...")
-        us, dps = measure_latency(policy_fn)
+        cont = bool(size.get("continuous", False))
+        us, dps = measure_latency(policy_fn, continuous=cont)
         params = size["params"]
         for regime, evasion in [("evade", True), ("non-evade", False)]:
-            m = run_eval(policy_fn, evasion, args.episodes)
+            m = run_eval(policy_fn, evasion, args.episodes, continuous=cont)
             spp = round(m["success_rate"] / (params / 100_000), 3) if params else ""
             rows.append({
                 "timestamp": ts, "agent": name, "label": args.label, "regime": regime,
