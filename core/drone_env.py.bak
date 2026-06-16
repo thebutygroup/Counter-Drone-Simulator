@@ -54,16 +54,13 @@ ACTIONS = [
 N_ACTIONS = len(ACTIONS)
 
 # --- reward shaping knobs ----------------------------------------------------
-CLOSING_SCALE = 0.10       # reward per pixel of distance closed this frame
-STEP_PENALTY = 0.03        # cost per frame (urgency) -- now the ONLY per-frame term
-SURVIVAL_BONUS = 0.0       # was 0.05. A net-POSITIVE idle reward (survival>step)
-                           #   taught the agent to loiter safely instead of commit
-                           #   to a risky intercept. Living must COST a little so the
-                           #   only way to score is to end the episode by catching.
+CLOSING_SCALE = 0.04       # reward per pixel of distance closed this frame
+STEP_PENALTY = 0.04        # cost per frame (urgency)
+SURVIVAL_BONUS = 0.1      # reward per frame ALIVE -> learn to fly before hunting
 INTERCEPT_BONUS = 100.0    # base reward for catching the target
-IMPACT_SPEED_BONUS = 6.0   # EXTRA reward per px/frame of CLOSING SPEED at impact (was 3.0)
+IMPACT_SPEED_BONUS = 50.0   # EXTRA reward per px/frame of CLOSING SPEED at impact (was 3.0)
                            #   -> a fast ram scores higher than a gentle drift-in
-WALL_DEATH_PENALTY = 10.0  # penalty for touching a wall (was 25.0) -- bolder approaches
+WALL_DEATH_PENALTY = 15.0  # penalty for touching a wall (was 25.0) -- bolder approaches
 WALL_TERMINATES = True     # touching any boundary kills the episode
 MAX_STEPS = 600            # episode timeout (~10s at 60fps)
 
@@ -74,21 +71,21 @@ MAX_STEPS = 600            # episode timeout (~10s at 60fps)
 ESCAPE_PENALTY = 8.0       # penalty when the target reaches safety (episode ends)
 
 # --- A1: impact-speed ramp (top speed is 10 px/frame -> demand a genuinely fast hit) ---
-MIN_IMPACT_SPEED = 3.0     # px/frame: below this the speed terms are ~0
-FULL_IMPACT_SPEED = 9.0    # px/frame: at/above this the speed terms saturate (~top speed)
+MIN_IMPACT_SPEED = 5.0     # px/frame: below this the speed terms are ~0
+FULL_IMPACT_SPEED = 20.0    # px/frame: at/above this the speed terms saturate (~top speed)
 # --- A2: dense wall-proximity penalty (in ADDITION to the terminal one) ------
 WALL_MARGIN = 100.0        # px from any wall where the dense penalty starts (bigger arena)
 WALL_PROX_COEF = 0.12      # per-frame penalty at the wall (was 0.20) -- the target now flees
                            #   TO the wall, so heavy edge-timidity would teach the chaser to
                            #   give up exactly where intercepts happen.
 # --- A3: backside-hit orientation --------------------------------------------
-IMPACT_ORIENT_BONUS = 15.0 # additive backside gradient (was 40.0) -- reward rear-first harder
-BACKSIDE_JACKPOT = 0.0   # BIG multiplicative prize for the HARD combo: fast AND backside-first
+IMPACT_ORIENT_BONUS = 10.0 # additive backside gradient (was 40.0) -- reward rear-first harder
+BACKSIDE_JACKPOT = 20.0   # BIG multiplicative prize for the HARD combo: fast AND backside-first
                            #   (was 120.0) -- JACKPOT * speed_gate * backside; only a fast
                            #   rear-first hit collects it, slow or prop-first gets ~none.
 # --- time-to-intercept: reward quick kills -----------------------------------
 TIME_BONUS = 60.0          # bonus for a fast kill, scaled by time_frac below
-PAR_STEPS = 150            # "par" time (frames). Instant kill -> full bonus; >= PAR -> none.
+PAR_STEPS = 250            # "par" time (frames). Instant kill -> full bonus; >= PAR -> none.
 
 # --- obstacles (only active when n_obstacles > 0) ----------------------------
 # Perception-AGNOSTIC: computed from obstacle geometry, identical for rays/slots,
@@ -96,12 +93,13 @@ PAR_STEPS = 150            # "par" time (frames). Instant kill -> full bonus; >=
 OBSTACLE_DEATH_PENALTY = 25.0  # terminal penalty for hitting an obstacle (counts as a crash)
 OBSTACLE_MARGIN = 60.0         # px of clearance where the dense penalty starts
 OBSTACLE_PROX_COEF = 0.20      # per-frame penalty strength at the obstacle surface
+N_OBSTACLES = 2
 
 
 class DroneInterceptEnv:
     def __init__(self, evasion=True, config=None,
                  wall_terminates=WALL_TERMINATES, seed=None,
-                 n_obstacles=0, perception="none", perception_kwargs=None,
+                 n_obstacles=N_OBSTACLES, perception="none", perception_kwargs=None,
                  continuous=False):
         import random
         from perception import make_perception
@@ -224,15 +222,14 @@ class DroneInterceptEnv:
         p = self.sim.player
         tvx = getattr(self, "_tvx", 0.0)
         tvy = getattr(self, "_tvy", 0.0)
-        vs = self.sim.cfg.top_speed or 1.0   # velocity scale: keep all features ~O(1)
         base = np.array([
             frame["state"]["distance"] / DIAG,
             frame["state"]["relative_angle"],
             p.angle,
-            p.vx / vs,      # [3] own velocity, normalized (was raw px/frame, ~±45)
-            p.vy / vs,      # [4]
-            tvx / vs,       # [5] target velocity, normalized
-            tvy / vs,       # [6]
+            p.vx,
+            p.vy,
+            tvx,
+            tvy,
             p.x / WIDTH,    # [7] own x position -> lets the agent SEE the side walls
             p.y / HEIGHT,   # [8] own y position -> lets the agent SEE floor/ceiling
         ], dtype=np.float32)

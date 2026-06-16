@@ -13,7 +13,7 @@ import random
 from dataclasses import dataclass
 from typing import Dict
 
-WIDTH, HEIGHT = 2400, 1800      # expanded arena (was 800x600)
+WIDTH, HEIGHT = 1800, 1350      # expanded arena (was 800x600)
 DRONE_RADIUS = 10
 FPS = 60                        # frames per second the sim is paced at
 
@@ -30,8 +30,8 @@ PIXELS_PER_METER = 25.0
 # Spawn rules
 # ---------------------------------------------------------------------------
 SPAWN_WALL_MARGIN = 400        # both drones start >= this many px from any wall
-SPAWN_MAX_SEP = 600    # 600px: reachable in ~1s at top speed
-SPAWN_MIN_SEP = 200            # not trivially on top of each other
+SPAWN_MAX_SEP = 1000    # 600px: reachable in ~1s at top speed
+SPAWN_MIN_SEP = 400            # not trivially on top of each other
 
 # ---------------------------------------------------------------------------
 # Target evasion AI -- tuning knobs
@@ -73,21 +73,23 @@ def _ray_to_boundary(x, y, ang, margin):
 @dataclass(frozen=True)
 class SimulationConfig:
     # Physical Constants
-    width: int = 2400
-    height: int = 1800
+    width: int = 1800
+    height: int = 1350
     drone_radius: int = 30
     fps: int = 60
     pixels_per_meter: float = 25.0
     
     # Speed/Control Limits
-    top_speed: float = 25.0
-    thrust_power: float = 10
-    turn_speed: float = 0.30
+    top_speed: float = 45.0
+    thrust_power: float = 4
+    turn_speed: float = 0.25
+    reverse_thrust_frac: float = 0.5
+    max_reverse_speed_frac = .85 
     
     # Target Ratios
-    target_speed_frac: float = 0.75
-    target_thrust_frac: float = 0.1
-    target_turn_frac: float = 0.1
+    target_speed_frac: float = 0.25
+    target_thrust_frac: float = 0.4
+    target_turn_frac: float = 0.4
 
     # Spawn/Evasion settings
     spawn_wall_margin: int = 400
@@ -127,6 +129,7 @@ class Drone:
         self.thrust_power = config.thrust_power
         self.turn_speed = config.turn_speed
         self.top_speed = config.top_speed
+        self.reverse_thrust_frac = config.reverse_thrust_frac
 
         self.drag = 0.99
         self.gravity = 0.06      # gentler -> survivable to hover (still a real pull)
@@ -148,10 +151,13 @@ class Drone:
         # 1. Orientation
         self.angle += turn * self.turn_speed
 
-        # 2. Thrust
+        # 2. Thrust (reverse is weaker by reverse_thrust_frac)
         if signed_thrust:
-            self.vx += math.cos(self.angle) * self.thrust_power * signed_thrust
-            self.vy += math.sin(self.angle) * self.thrust_power * signed_thrust
+            power = self.thrust_power
+            if signed_thrust < 0:
+                power *= self.reverse_thrust_frac
+            self.vx += math.cos(self.angle) * power * signed_thrust
+            self.vy += math.sin(self.angle) * power * signed_thrust
 
         # 3. Drag
         self.vx *= self.drag
@@ -183,7 +189,6 @@ class Drone:
 
 
 class DroneSimulator:
-    # Syntax Error Fix: Required 'config' MUST come before optional defaults
     def __init__(self, config: SimulationConfig, evasion=True, rng=None, n_obstacles=0):
         # Store the config first
         self.cfg = config
@@ -288,7 +293,13 @@ class DroneSimulator:
             self.target.y <= WALL_OFFSET or
             self.target.y >= HEIGHT - WALL_OFFSET)
 
-        if (is_collision or target_escaped) and auto_reset:
+        player_crashed = (
+            self.player.x <= DRONE_RADIUS or
+            self.player.x >= WIDTH - DRONE_RADIUS or
+            self.player.y <= DRONE_RADIUS or
+            self.player.y >= HEIGHT - DRONE_RADIUS)
+
+        if (is_collision or target_escaped or player_crashed) and auto_reset:
             self.reset()
 
         obstacle_hit = False

@@ -29,9 +29,8 @@ from drone_core import SimulationConfig, cfg
 
 # Observation layout (see drone_env._obs):
 # [dist_norm, rel_angle, heading, vx, vy, tvx, tvy, px, py]
-# velocities are normalized by top_speed in _obs, so their bounds are ~[-1.2,1.2]
-_OBS_LOW = np.array([0.0, -math.pi, -math.pi, -1.2, -1.2, -1.2, -1.2, 0.0, 0.0], dtype=np.float32)
-_OBS_HIGH = np.array([1.5,  math.pi,  math.pi,  1.2,  1.2,  1.2,  1.2, 1.0, 1.0], dtype=np.float32)
+_OBS_LOW = np.array([0.0, -math.pi, -math.pi, -60, -60, -60, -60, 0.0, 0.0], dtype=np.float32)
+_OBS_HIGH = np.array([1.5,  math.pi,  math.pi,  60,  60,  60,  60, 1.0, 1.0], dtype=np.float32)
 
 
 def _wrap(a):
