@@ -1,6 +1,6 @@
 # Counter-Drone Simulator
 
-## **NOTE: This project has gone private as of June 16th 2026**
+## **NOTE: This repo has been abandon and gone private as of June 16th 2026**
 
 A drone-intercept simulator with reinforcement-learning agents, built on one shared
 physics/RL engine. The project escalates along **two axes**: agent capability
